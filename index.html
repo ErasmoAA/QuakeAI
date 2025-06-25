@@ -11,8 +11,6 @@
     <!-- Lucide Icons para los íconos (versión para vanilla JS) -->
     <script src="https://unpkg.com/lucide@latest"></script>
     
-    <!-- TensorFlow.js para el modelo de Machine Learning -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
     
     <style>
         /* Estilo para la animación del spinner de carga */
@@ -180,7 +178,6 @@
             historicalListEl = document.getElementById('historical-list');
 
         // --- LÓGICA DE LA APLICACIÓN ---
-        let model = null;
 
         // 1. INICIO: OBTENER UBICACIÓN DEL USUARIO Y RENDERIZAR ÍCONOS
         window.onload = () => {
@@ -218,7 +215,7 @@
                 const earthquakeData = await loadUSGSData(latitude, longitude, 365 * 5); // 5 años de datos
                 
                 if (earthquakeData.length < 50) {
-                     showError(`Pocos datos sísmicos (${earthquakeData.length}) en la región para entrenar un modelo fiable.`);
+                     showError(`Pocos datos sísmicos (${earthquakeData.length}) en la región para generar predicciones fiables.`);
                      return;
                 }
                 
@@ -227,13 +224,11 @@
 
                 // Iniciar la app
                 hideLoadingScreen();
-                
-                // Entrenar el modelo de IA
-                await createAndTrainModel(earthquakeData, { lat: latitude, lng: longitude });
-
-            } catch (error) {
-                console.error('Error en el flujo principal:', error);
-                showError('No se pudo inicializar la aplicación.', error);
+                const predictions = generatePredictions(earthquakeData, { lat: latitude, lng: longitude });
+                renderPredictions(predictions);
+                updateStatusCards(earthquakeData, predictions);
+                modelStatusSymbolEl.textContent = "✓";
+                modelStatusTextEl.textContent = "Modelo Estadistico";
             }
         }
 
@@ -298,124 +293,30 @@
                 depth: feature.geometry.coordinates[2]
             }));
         }
-
-        // 4. CREAR Y ENTRENAR LA RED NEURONAL
-        async function createAndTrainModel(data, userLocation) {
-            modelStatusSymbolEl.textContent = '🧠';
-            modelStatusTextEl.innerHTML = `
-                <div class="w-full bg-gray-600 rounded-full h-2.5">
-                    <div id="training-progress-bar" class="bg-purple-500 h-2.5 rounded-full" style="width: 0%"></div>
-                </div>
-                <p class="text-xs text-center mt-1">Entrenando IA... 0%</p>
-            `;
-
-            // Preparar datos para entrenamiento
-            const features = data.map(eq => [
-                eq.magnitude,
-                eq.depth,
-                eq.lat,
-                eq.lng,
-                eq.time.getTime() / 1000000000, // Normalizar tiempo
-                Math.sin(eq.time.getMonth() * Math.PI / 6), // Estacionalidad mensual
-                Math.cos(eq.time.getMonth() * Math.PI / 6),
-                Math.sin(eq.time.getDay() * Math.PI / 3.5), // Estacionalidad semanal
-                Math.cos(eq.time.getDay() * Math.PI / 3.5),
-            ]);
-            
-            // Los datos ya están ordenados por tiempo descendente desde la API
-            const labels = data.map((eq, index) => {
-                const futureEqs = data.slice(0, index).filter(futureEq => 
-                    futureEq.time > eq.time && 
-                    futureEq.time < new Date(eq.time.getTime() + 30 * 24 * 60 * 60 * 1000)
-                );
-                return futureEqs.length > 0 ? 1 : 0;
+        // 4. GENERAR PREDICCIONES DETERMINISTICAS
+        function generatePredictions(data, location) {
+            const gridSize = 0.5;
+            const clusters = {};
+            data.forEach(eq => {
+                if (Math.abs(eq.lat - location.lat) > 4 || Math.abs(eq.lng - location.lng) > 4) return;
+                const latKey = (Math.round(eq.lat / gridSize) * gridSize).toFixed(1);
+                const lngKey = (Math.round(eq.lng / gridSize) * gridSize).toFixed(1);
+                const key = `${latKey}_${lngKey}`;
+                if (!clusters[key]) clusters[key] = { lat: 0, lng: 0, depth: 0, mag: 0, count: 0 };
+                clusters[key].lat += eq.lat;
+                clusters[key].lng += eq.lng;
+                clusters[key].depth += eq.depth;
+                clusters[key].mag += eq.magnitude;
+                clusters[key].count++;
             });
-
-            const xs = tf.tensor2d(features);
-            const ys = tf.tensor2d(labels.map(l => [l]));
-
-            // Crear el modelo
-            model = tf.sequential({
-                layers: [
-                    tf.layers.dense({ inputShape: [9], units: 64, activation: 'relu' }),
-                    tf.layers.dropout({ rate: 0.3 }),
-                    tf.layers.dense({ units: 32, activation: 'relu' }),
-                    tf.layers.dropout({ rate: 0.3 }),
-                    tf.layers.dense({ units: 1, activation: 'sigmoid' })
-                ]
-            });
-            
-            model.compile({
-                optimizer: tf.train.adam(0.001),
-                loss: 'binaryCrossentropy',
-                metrics: ['accuracy']
-            });
-            
-            // Entrenar
-            await model.fit(xs, ys, {
-                epochs: 75,
-                batchSize: 64,
-                validationSplit: 0.2,
-                callbacks: {
-                    onEpochEnd: (epoch, logs) => {
-                        const progress = ((epoch + 1) / 75) * 100;
-                        const progressBar = document.getElementById('training-progress-bar');
-                        if (progressBar) {
-                            progressBar.style.width = `${progress}%`;
-                            modelStatusTextEl.querySelector('p').textContent = `Entrenando IA... ${progress.toFixed(0)}%`;
-                        }
-                    }
-                }
-            });
-
-            modelStatusSymbolEl.textContent = '✓';
-            modelStatusTextEl.textContent = 'Red Neuronal Activa';
-            
-            // Generar predicciones finales
-            const predictions = await generatePredictions(model, userLocation);
-            renderPredictions(predictions);
-            updateStatusCards(data, predictions);
-
-            xs.dispose();
-            ys.dispose();
-        }
-
-        // 5. GENERAR PREDICCIONES
-        async function generatePredictions(trainedModel, location) {
-            const predictions = [];
-            const currentTime = new Date();
-            const predictionPoints = 20;
-
-            for (let i = 0; i < predictionPoints; i++) {
-                // Generar puntos en un radio más amplio
-                const lat = location.lat + (Math.random() - 0.5) * 4;
-                const lng = location.lng + (Math.random() - 0.5) * 4;
-                const depth = Math.random() * 50;
-                const magnitude = 3 + Math.random() * 4;
-
-                const featuresTensor = tf.tensor2d([[
-                    magnitude, depth, lat, lng,
-                    currentTime.getTime() / 1000000000,
-                    Math.sin(currentTime.getMonth() * Math.PI / 6),
-                    Math.cos(currentTime.getMonth() * Math.PI / 6),
-                    Math.sin(currentTime.getDay() * Math.PI / 3.5),
-                    Math.cos(currentTime.getDay() * Math.PI / 3.5)
-                ]]);
-                
-                const predictionResult = await trainedModel.predict(featuresTensor).data();
-                featuresTensor.dispose();
-                
-                if (predictionResult[0] * 100 > 10) { // Filtrar predicciones de baja probabilidad
-                    predictions.push({
-                        id: i, lat, lng,
-                        probability: predictionResult[0] * 100,
-                        magnitude, depth,
-                        timeframe: `${7 + Math.floor(Math.random() * 23)} días`
-                    });
-                }
-            }
-
-            return predictions.sort((a, b) => b.probability - a.probability);
+            return Object.values(clusters).map(c => ({
+                lat: c.lat / c.count,
+                lng: c.lng / c.count,
+                depth: c.depth / c.count,
+                magnitude: c.mag / c.count,
+                probability: Math.min(c.count / data.length * 120, 100),
+                timeframe: "Próximos 30 días"
+            })).sort((a,b) => b.probability - a.probability).slice(0,20);
         }
 
         // --- FUNCIONES DE RENDERIZADO Y UI ---
@@ -507,4 +408,3 @@
     </script>
 </body>
 </html>
-
